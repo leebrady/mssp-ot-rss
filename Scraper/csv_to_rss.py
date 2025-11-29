@@ -12,12 +12,36 @@ from urllib.parse import urlparse
 import requests
 
 
-def parse_date(date_str: str) -> str:
+def extract_episode_number(title: str) -> int:
     """
-    Parse various date formats and return RFC 2822 format for RSS.
+    Extract episode number from title like "Ep. 1" or "Ep. 147".
+    Returns episode number or -1 if not found.
     """
+    import re
+    match = re.search(r'Ep\.?\s*(\d+)', title, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    return -1
+
+
+def parse_date(date_str: str, episode_num: int = 0) -> tuple:
+    """
+    Parse various date formats and return (RFC 2822 format, episode_number).
+    Uses episode number as primary sort key if available.
+    """
+    # If we have an episode number, use it to generate a synthetic date
+    # Episodes started in Nov 2016, approximately 1-2 per week
+    if episode_num > 0:
+        # First episode was around Nov 22, 2016
+        # Estimate: Nov 22, 2016 = episode 1
+        start_date = datetime(2016, 11, 22)
+        # Assume roughly 1.5 episodes per week = ~3.5 days per episode
+        days_offset = (episode_num - 1) * 3.5
+        episode_date = start_date + __import__('datetime').timedelta(days=days_offset)
+        return (episode_date.strftime("%a, %d %b %Y %H:%M:%S +0000"), episode_num)
+    
     if not date_str or date_str == "Unknown":
-        return datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
+        return (datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000"), 0)
     
     # Try common date formats
     formats = [
@@ -29,12 +53,12 @@ def parse_date(date_str: str) -> str:
     for fmt in formats:
         try:
             parsed = datetime.strptime(date_str, fmt)
-            return parsed.strftime("%a, %d %b %Y %H:%M:%S +0000")
+            return (parsed.strftime("%a, %d %b %Y %H:%M:%S +0000"), 0)
         except ValueError:
             continue
     
     # If parsing fails, use current date
-    return datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
+    return (datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000"), 0)
 
 
 def get_audio_duration(audio_url: str) -> int:
@@ -69,10 +93,13 @@ def csv_to_rss(csv_path: Path, rss_path: Path, feed_url: str = None) -> None:
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            title = row.get("title", "").strip(' ">')
+            episode_num = extract_episode_number(title)
+            row["episode_num"] = episode_num
             episodes.append(row)
     
-    # Reverse to have newest first (typical for podcasts)
-    episodes.reverse()
+    # Sort by episode number (oldest first) for chronological order in podcast apps
+    episodes.sort(key=lambda x: x["episode_num"] if x["episode_num"] > 0 else 999999)
     
     # Create RSS structure
     rss = ET.Element("rss")
@@ -103,7 +130,7 @@ def csv_to_rss(csv_path: Path, rss_path: Path, feed_url: str = None) -> None:
     ET.SubElement(channel, itunes_ns + "explicit").text = "yes"
     ET.SubElement(channel, itunes_ns + "image").set("href", "https://msspoldt.com/image.jpg")
     
-    # Add episodes as items
+    # Add episodes as items (oldest to newest)
     for idx, episode in enumerate(episodes, 1):
         item = ET.SubElement(channel, "item")
         
@@ -128,8 +155,9 @@ def csv_to_rss(csv_path: Path, rss_path: Path, feed_url: str = None) -> None:
             guid.set("isPermaLink", "false")
             guid.text = audio_url
         
-        # Publish date
-        pub_date = parse_date(episode.get("date", "Unknown"))
+        # Publish date - use episode number to determine chronological order
+        episode_num = episode.get("episode_num", -1)
+        pub_date, _ = parse_date(episode.get("date", "Unknown"), episode_num)
         ET.SubElement(item, "pubDate").text = pub_date
         
         # iTunes metadata for item
@@ -147,7 +175,7 @@ def csv_to_rss(csv_path: Path, rss_path: Path, feed_url: str = None) -> None:
     with open(rss_path, "w", encoding="utf-8") as f:
         f.write(xml_str)
     
-    print(f"[+] Generated RSS feed with {len(episodes)} episodes")
+    print(f"[+] Generated RSS feed with {len(episodes)} episodes (sorted by episode number)")
     print(f"[+] Saved to {rss_path}")
     print(f"\n[*] RSS Feed URL for Overcast:")
     print(f"    Raw GitHub URL: https://raw.githubusercontent.com/leebrady/mssp-ot-rss/main/feed.xml")
